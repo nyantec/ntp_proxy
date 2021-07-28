@@ -1,12 +1,10 @@
 use std::net::Ipv4Addr;
-use std::os::unix::io::AsRawFd;
 
 use afpacket::r#async::RawPacketStream;
 use anyhow::{Context, Result};
 use async_std::prelude::*;
 use log::*;
-use nix::net::if_::if_nametoindex;
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::MutableIpv4Packet;
 use pnet::packet::udp::{ipv4_checksum_adv, MutableUdpPacket};
@@ -14,26 +12,6 @@ use pnet::packet::{MutablePacket, Packet, PacketSize};
 
 pub fn setup_interface(interface: &str, dst_port: u16) -> Result<RawPacketStream> {
 	let mut stream = RawPacketStream::new().context("Open interface")?;
-
-	/*let fd = stream.as_raw_fd();
-	let ifindex = if_nametoindex(interface).context("Get index of interface")?;
-
-	use nix::libc;
-	unsafe {
-		let mut ss: libc::sockaddr_storage = std::mem::zeroed();
-		let sll: *mut libc::sockaddr_ll =
-			&mut ss as *mut libc::sockaddr_storage as *mut libc::sockaddr_ll;
-		(*sll).sll_family = libc::AF_PACKET as u16;
-		(*sll).sll_protocol = (libc::ETH_P_ALL as u16).to_be();
-		(*sll).sll_ifindex = ifindex as i32;
-		(*sll).sll_pkttype = 3; // PACKET_BROADCAST
-
-		let sa = (&ss as *const libc::sockaddr_storage) as *const libc::sockaddr;
-		let res = libc::bind(fd, sa, std::mem::size_of::<libc::sockaddr_ll>() as u32);
-		if res == -1 {
-			return Err(std::io::Error::last_os_error()).context("");
-		}
-	}*/
 
 	stream
 		.bind(interface)
