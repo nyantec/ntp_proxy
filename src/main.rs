@@ -1,116 +1,116 @@
-use afpacket::sync::RawPacketStream;
-use anyhow::{Context, Result};
-use pnet::packet::ethernet::{EtherTypes, Ethernet, EthernetPacket, MutableEthernetPacket};
-use pnet::packet::icmp::echo_request::{EchoRequest, IcmpCodes, MutableEchoRequestPacket};
-use pnet::packet::icmp::{IcmpPacket, IcmpTypes};
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::ipv4;
-use pnet::packet::ipv4::{Ipv4, Ipv4Packet, MutableIpv4Packet};
-use pnet::packet::udp::MutableUdpPacket;
-use pnet::packet::Packet;
-use pnet::util::checksum;
-use pnet::util::MacAddr;
-use std::cell::RefCell;
-use std::io::{Read, Write};
-use std::net::Ipv4Addr;
-use std::ptr::eq;
+mod proxy;
+mod validators;
 
-fn main() {
-    let mut ps = RawPacketStream::new().unwrap();
-    ps.bind("lo").unwrap();
+use anyhow::Result;
+use clap::{App, Arg};
 
-    // tcpdump -p -ni lo -ddd "udp"
-    ps.set_bpf_filter(vec![
-        // length: 12
-        (40, 0, 0, 12),
-        (21, 0, 5, 34525),
-        (48, 0, 0, 20),
-        (21, 6, 0, 17),
-        (21, 0, 6, 44),
-        (48, 0, 0, 54),
-        (21, 3, 4, 17),
-        (21, 0, 3, 2048),
-        (48, 0, 0, 23),
-        (21, 0, 1, 17),
-        (6, 0, 0, 262144),
-        (6, 0, 0, 0),
-    ])
-    .unwrap();
-
-    let mut out = RawPacketStream::new().unwrap();
-    out.bind("veth0").unwrap();
-
-    ntp_pnet(ps, out).unwrap();
+#[async_std::main]
+async fn main() {
+	if let Err(e) = main_err().await {
+		eprintln!("Error:");
+		eprintln!("{:?}", e);
+		std::process::exit(1);
+	}
 }
 
-fn ntp_pnet(mut ps: RawPacketStream, mut out: RawPacketStream) -> Result<()> {
-    let mut offset;
-    loop {
-        let buf = RefCell::new([0u8; 1500]);
-        ps.read(&mut *buf.borrow_mut());
-        /*{
-            let mut buf = *buf.borrow_mut();
-            buf = [0; 1500];
-            ps.read(&mut buf)?;
-        }*/
+async fn main_err() -> Result<()> {
+	env_logger::init();
+	let app = App::new("ntp_proxy")
+		.version(env!("CARGO_PKG_VERSION"))
+		.author(env!("CARGO_PKG_AUTHORS"))
+		.about("Forwarder for ntp broadcast traffic")
+		.setting(clap::AppSettings::ColorAuto)
+		.setting(clap::AppSettings::ColoredHelp)
+		.arg(
+			Arg::with_name("interface")
+				.long("interface")
+				.short("i")
+				.value_name("INTERFACE")
+				.help("inner interface to listen for ntp packages to forward")
+				.takes_value(true)
+				.env("NTPPROXY_INTERFACE")
+				.default_value("lo")
+				.required(true)
+				.validator(validators::is_interface),
+		)
+		.arg(
+			Arg::with_name("outerface")
+				.long("outerface")
+				.short("o")
+				.value_name("INTERFACE")
+				.help("outer interface to forward ntp package to")
+				.takes_value(true)
+				.env("NTPPROXY_OUTERFACE")
+				.required(true)
+				.validator(validators::is_interface),
+		)
+		.arg(
+			Arg::with_name("address")
+				.long("address")
+				.short("a")
+				.value_name("ADDRESS")
+				.help("address to write into ipv4 header")
+				.env("NTPPROXY_ADDRESS")
+				.required(true)
+				.validator(validators::is_address4),
+		)
+		.arg(
+			Arg::with_name("port")
+				.long("port")
+				.short("p")
+				.value_name("PORT")
+				.help("port to set as source port in upd header")
+				//.default_value("0")
+				.env("NTPPROXY_PORT")
+				.validator(validators::is_port),
+		)
+		.arg(
+			Arg::with_name("dst_port")
+				.long("dst-port")
+				.value_name("PORT")
+				.help("Port to listen for ntp packages")
+				.default_value("123")
+				.env("NTPPROXY_DST_PORT")
+				.required(true)
+				.validator(validators::is_port),
+		)
+		.arg(
+			Arg::with_name("dst_addr")
+				.long("dst-addr")
+				.value_name("ADDRESS")
+				.help("new destination address for packets")
+				.env("NTPPROXY_DST_ADDR")
+				.required(false)
+				.validator(validators::is_address4),
+		);
 
-        {
-            let buf = *buf.borrow();
-            let ethernet = EthernetPacket::new(&buf).context("ethernet")?;
-            //println!("{:?}", ethernet);
+	let matches = app.get_matches();
 
-            if ethernet.get_ethertype() != EtherTypes::Ipv4 {
-                continue;
-            }
-            offset = EthernetPacket::minimum_packet_size();
-        }
+	let in_stream = proxy::setup_interface(
+		// SAFETY: all is validate before
+		matches.value_of("interface").unwrap(),
+		// SAFETY: all is validate before
+		matches.value_of("dst_port").unwrap().parse().unwrap(),
+	)?;
 
-        let (ipv4_source, ipv4_dest, length) = {
-            let mut buf = *buf.borrow_mut();
-            let mut ipv4 = MutableIpv4Packet::new(&mut buf[offset..]).context("ipv4")?;
-            //println!("{:?}", ipv4);
-            if ipv4.get_next_level_protocol() != IpNextHeaderProtocols::Udp {
-                continue;
-            }
+	let out_stream = proxy::setup_outerface(
+		// SAFETY: all is validate before
+		matches.value_of("outerface").unwrap(),
+	)?;
 
-            ipv4.set_source(Ipv4Addr::new(172, 16, 16, 1));
-            ipv4.set_checksum(pnet::packet::ipv4::checksum(&ipv4.to_immutable()));
-
-            offset += (ipv4.get_header_length() * 4) as usize;
-            (
-                ipv4.get_source(),
-                ipv4.get_destination(),
-                ipv4.get_total_length() as usize - (ipv4.get_header_length() * 4) as usize,
-            )
-        };
-
-        {
-            let mut buf = *buf.borrow_mut();
-            let mut udp =
-                MutableUdpPacket::new(&mut buf[offset..(offset + length)]).context("udp")?;
-            if udp.get_destination() != 123 {
-                continue;
-            }
-            //udp.set_source(0);
-            println!("{:?}", udp);
-
-            println!("{:X?}", udp.to_immutable().packet());
-            assert_eq!(udp.get_length(), udp.to_immutable().packet().len() as u16);
-
-            let checksum = pnet::packet::udp::ipv4_checksum_adv(
-                &udp.to_immutable(),
-                &[],
-                &ipv4_source,
-                &ipv4_dest,
-            );
-            udp.set_checksum(checksum);
-
-            println!("calculated checksum: {:X?}", checksum.to_be_bytes());
-            println!("calculated checksum: {:X?}", (!checksum).to_be_bytes());
-        }
-
-        println!("writing");
-        out.write_all(&buf.borrow()[0..(offset + length)])?;
-    }
-    Ok(())
+	proxy::run(
+		in_stream,
+		out_stream,
+		// SAFETY: address is validated by clap
+		matches.value_of("address").unwrap().parse().unwrap(),
+		matches.value_of("port").map(|p| p.parse().ok()).flatten(),
+		// SAFETY: dst_port is validated by clap
+		matches.value_of("dst_port").unwrap().parse().unwrap(),
+		matches
+			.value_of("dst_addr")
+			.map(|a| a.parse().ok())
+			.flatten(),
+	)
+	.await?;
+	Ok(())
 }
