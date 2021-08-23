@@ -39,6 +39,7 @@ pub fn setup_interface(interface: &str, dst_port: u16) -> Result<RawPacketStream
 		])
 		.context("Set bpf filter to interface")?;
 
+	info!("Opened source network");
 	Ok(stream)
 }
 
@@ -48,6 +49,7 @@ pub fn setup_outerface(interface: &str) -> Result<RawPacketStream> {
 		.bind(interface)
 		.with_context(|| format!("Bind to interface {}", interface))?;
 
+	info!("opened destination network");
 	Ok(stream)
 }
 
@@ -72,6 +74,7 @@ pub async fn run(
 
 		let mut ethernet = MutableEthernetPacket::new(&mut buf).context("Parsing EthernetFrame")?;
 		if ethernet.get_ethertype() != EtherTypes::Ipv4 {
+			trace!("invalid ethertype: {}", ethernet.get_ethertype());
 			continue;
 		}
 
@@ -81,6 +84,10 @@ pub async fn run(
 			MutableIpv4Packet::new(ethernet.payload_mut()).context("Parsing ipv4 packet")?;
 
 		if ipv4.get_next_level_protocol() != IpNextHeaderProtocols::Udp {
+			trace!(
+				"invalid next level protocol: {}",
+				ipv4.get_next_level_protocol()
+			);
 			continue;
 		}
 
@@ -107,6 +114,7 @@ pub async fn run(
 
 		let mut udp = MutableUdpPacket::new(ipv4.payload_mut()).context("Parsing udp packet")?;
 		if udp.get_destination() != dst_port {
+			trace!("invalid udp port: {}", udp.get_destination());
 			continue;
 		}
 
