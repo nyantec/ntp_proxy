@@ -1,6 +1,8 @@
 {
   description = "ntp-proxy";
 
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable-small";
+
   outputs = { self, nixpkgs }: let
     overlay = final: prev: {
       ntp-proxy = final.callPackage (
